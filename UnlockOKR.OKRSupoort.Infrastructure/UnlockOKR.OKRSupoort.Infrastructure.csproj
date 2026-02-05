@@ -1,0 +1,25 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netcoreapp3.1</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="AutoMapper" Version="11.0.0" />
+    <PackageReference Include="Azure.Messaging.ServiceBus" Version="7.10.0" />
+    <PackageReference Include="Dapr.Client" Version="1.5.0" />
+    <PackageReference Include="Microsoft.AspNetCore.Diagnostics.Abstractions" Version="2.2.0" />
+    <PackageReference Include="Microsoft.AspNetCore.Hosting.Abstractions" Version="2.2.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\UnlockOKR.OKRSupoort.Domain\UnlockOKR.OKRSupoort.Domain.csproj" />
+    <ProjectReference Include="..\UnlockOKR.OKRSupoort.Persistence\UnlockOKR.OKRSupoort.Persistence.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Folder Include="Adapters\CommandHandlers\" />
+    <Folder Include="Adapters\QueryHandlers\" />
+  </ItemGroup>
+
+</Project>
