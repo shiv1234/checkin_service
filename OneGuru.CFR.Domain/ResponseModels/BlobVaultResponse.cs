@@ -1,0 +1,11 @@
+namespace OneGuru.CFR.Domain.ResponseModels
+{
+    public class BlobVaultResponse
+    {
+        public string BlobAccountName { get; set; }
+        public string BlobAccountKey { get; set; }
+        public string BlobCdnUrl { get; set; }
+        public string BlobContainerName { get; set; }
+        public string BlobCdnCommonUrl { get; set; }
+    }
+}
