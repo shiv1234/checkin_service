@@ -1,3 +1,4 @@
+#nullable enable
 using OneGuru.CFR.Domain.ResponseModels;
 
 namespace OneGuru.CFR.Domain.RequestModel;

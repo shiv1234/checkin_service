@@ -1,3 +1,4 @@
+#nullable enable
 namespace OneGuru.CFR.Domain.RequestModel;
 
 public class AuditLogRequest

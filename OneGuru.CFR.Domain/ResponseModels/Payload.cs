@@ -1,3 +1,4 @@
+#nullable enable
 namespace OneGuru.CFR.Domain.ResponseModels;
 
 /// <summary>

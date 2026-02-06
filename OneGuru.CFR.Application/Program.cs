@@ -21,8 +21,11 @@ using OneGuru.CFR.Infrastructure.AutoMapper;
 using OneGuru.CFR.Infrastructure.Messaging;
 using OneGuru.CFR.Infrastructure.Services;
 using OneGuru.CFR.Infrastructure.Services.Contracts;
+using OneGuru.CFR.Infrastructure.Tenancy;
+using OneGuru.CFR.Persistence.Dapper;
 using OneGuru.CFR.Persistence.EntityFrameworkDataAccess;
 using OneGuru.CFR.Persistence.EntityFrameworkDataAccess.Entities;
+using OneGuru.CFR.Persistence.EntityFrameworkDataAccess.Interceptors;
 
 [ExcludeFromCodeCoverage]
 public class Program
@@ -205,6 +208,14 @@ public class Program
 
     private static void ConfigureDatabase(IServiceCollection services, IConfiguration configuration)
     {
+        // Tenant Context - centralized tenant resolution
+        services.AddScoped<ITenantContext, HttpTenantContext>();
+
+        // EF Core Interceptors
+        services.AddScoped<AuditSaveChangesInterceptor>();
+        services.AddScoped<SoftDeleteInterceptor>();
+
+        // Shared Tenant Database (CfrContext) - tenant metadata, admin tables
         var keyVault = new DatabaseVaultResponse();
 
         services.AddDbContext<CfrContext>((serviceProvider, options) =>
@@ -243,6 +254,23 @@ public class Program
                 }
             }
         });
+
+        // Per-Organization Database (OrgDbContext) - operational data with interceptors
+        services.AddDbContext<OrgDbContext>((serviceProvider, options) =>
+        {
+            var tenantContext = serviceProvider.GetRequiredService<ITenantContext>();
+            if (tenantContext.IsResolved)
+            {
+                options.UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking)
+                       .UseSqlServer(tenantContext.ConnectionString)
+                       .AddInterceptors(
+                           serviceProvider.GetRequiredService<SoftDeleteInterceptor>(),
+                           serviceProvider.GetRequiredService<AuditSaveChangesInterceptor>());
+            }
+        });
+
+        // Dapper Context - raw SQL for performance-critical queries
+        services.AddScoped<IDapperContext, DapperContext>();
     }
 
     private static void ConfigureAuthentication(IServiceCollection services, IConfiguration configuration)
@@ -318,6 +346,7 @@ public class Program
         services.AddScoped<IOperationStatus, OperationStatus>();
         services.AddScoped<ICfrDbContext>(opt => opt.GetRequiredService<CfrDbContext>());
         services.AddScoped<IUnitOfWorkAsync, UnitOfWork>();
+        services.AddScoped<IOrgUnitOfWork, OrgUnitOfWork>();
         services.AddTransient<IServicesAggregator, ServicesAggregator>();
         services.AddTransient<OneGuru.CFR.Domain.Ports.ILogger, Logger>();
         services.AddTransient<ICommonBase, CommonBase>();

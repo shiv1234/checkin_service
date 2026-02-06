@@ -5,6 +5,9 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 
+#pragma warning disable SYSLIB0022 // RijndaelManaged is obsolete - kept for backward compatibility with existing encrypted data
+#pragma warning disable SYSLIB0041 // Rfc2898DeriveBytes ctor is obsolete - kept for backward compatibility
+
 namespace OneGuru.CFR.Domain.Common
 {
     [ExcludeFromCodeCoverage]
