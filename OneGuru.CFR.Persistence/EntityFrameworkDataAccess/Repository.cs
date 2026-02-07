@@ -1,5 +1,4 @@
 using Microsoft.EntityFrameworkCore;
-using OneGuru.CFR.Persistence.EntityFrameworkDataAccess.Entities;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
@@ -13,9 +12,9 @@ namespace OneGuru.CFR.Persistence.EntityFrameworkDataAccess
     [ExcludeFromCodeCoverage]
     public class Repository<T> : IRepositoryAsync<T> where T : class
     {
-        protected readonly CfrContext Context;
+        protected readonly DbContext Context;
         private readonly DbSet<T> _dbSet;
-        public Repository(CfrContext context)
+        public Repository(DbContext context)
         {
             this.Context = context;
             _dbSet = context.Set<T>();

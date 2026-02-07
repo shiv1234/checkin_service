@@ -259,10 +259,18 @@ public class Program
         services.AddDbContext<OrgDbContext>((serviceProvider, options) =>
         {
             var tenantContext = serviceProvider.GetRequiredService<ITenantContext>();
-            if (tenantContext.IsResolved)
+            var connectionString = tenantContext.IsResolved
+                ? tenantContext.ConnectionString
+                : configuration.GetConnectionString("ConnectionString");
+
+            if (!string.IsNullOrEmpty(connectionString))
             {
                 options.UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking)
-                       .UseSqlServer(tenantContext.ConnectionString)
+                       .UseSqlServer(connectionString, sqlOptions =>
+                           sqlOptions.EnableRetryOnFailure(
+                               maxRetryCount: 3,
+                               maxRetryDelay: TimeSpan.FromSeconds(5),
+                               errorNumbersToAdd: null))
                        .AddInterceptors(
                            serviceProvider.GetRequiredService<SoftDeleteInterceptor>(),
                            serviceProvider.GetRequiredService<AuditSaveChangesInterceptor>());
@@ -321,6 +329,12 @@ public class Program
             options.AddPolicy(AuthorizationPolicies.CanEditCheckins, policy =>
                 policy.RequireAuthenticatedUser()
                       .RequireClaim("permissions", "checkin.edit"));
+
+            options.AddPolicy(AuthorizationPolicies.CanDeleteCheckins, policy =>
+                policy.RequireAuthenticatedUser());
+
+            options.AddPolicy(AuthorizationPolicies.CanSubmitCheckins, policy =>
+                policy.RequireAuthenticatedUser());
 
             options.AddPolicy(AuthorizationPolicies.CanViewTeamDashboard, policy =>
                 policy.RequireAuthenticatedUser()
@@ -424,10 +438,12 @@ public class Program
 
         // Authentication & Authorization
         app.UseAuthentication();
-        app.UseAuthorization();
 
-        // Custom Token Middleware (for legacy support)
+        // Custom Token Middleware - runs after Azure AD auth but before authorization
+        // so legacy JWT tokens are processed before [Authorize] checks
         app.UseMiddleware<TokenManagerMiddleware>();
+
+        app.UseAuthorization();
 
         // Health Check Endpoint
         app.MapHealthChecks("/health");

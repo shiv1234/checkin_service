@@ -1,198 +1,235 @@
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
+using Newtonsoft.Json;
 using OneGuru.CFR.Domain.Common;
+using OneGuru.CFR.Domain.RequestModel;
+using OneGuru.CFR.Infrastructure.Services.Contracts;
+using System;
+using System.Collections.Generic;
 using System.IdentityModel.Tokens.Jwt;
+using System.Linq;
 using System.Net;
 using System.Security.Claims;
 using System.Text;
-using System.Text.Json;
-using OneGuru.CFR.Infrastructure.Services.Contracts;
-using OneGuru.CFR.Domain.RequestModel;
+using System.Threading.Tasks;
 
-namespace OneGuru.CFR.Application.Extensions;
-
-public class TokenManagerMiddleware : IMiddleware
+namespace OneGuru.CFR.Application.Extensions
 {
-    private readonly IConfiguration _configuration;
-    private readonly ISystemService _systemService;
-
-    public TokenManagerMiddleware(IConfiguration configuration, ISystemService systemService)
+    public class TokenManagerMiddleware : IMiddleware
     {
-        _configuration = configuration;
-        _systemService = systemService;
-    }
+        private readonly IConfiguration _configuration;
+        private readonly ISystemService _systemService;
 
-    public async Task InvokeAsync(HttpContext context, RequestDelegate next)
-    {
-        // Skip authentication for health checks and swagger
-        if (context.Request.Path.Value?.Contains("health") == true ||
-            context.Request.Path.Value?.Contains("swagger") == true)
+        public TokenManagerMiddleware(IConfiguration configuration, ISystemService systemService)
         {
-            await next(context);
-            return;
+            _configuration = configuration;
+            _systemService = systemService;
         }
 
-        // If already authenticated via Azure AD, proceed
-        if (context.User?.Identity?.IsAuthenticated == true)
+        public async Task InvokeAsync(HttpContext context, RequestDelegate next)
         {
-            await next(context);
-            return;
-        }
-
-        // Legacy token validation for backwards compatibility
-        string authorization = context.Request.Headers["Authorization"];
-        if (string.IsNullOrEmpty(authorization))
-        {
-            authorization = context.Request.Headers["Token"];
-            if (string.IsNullOrEmpty(authorization))
+            if (!context.Request.Path.Value.Contains("health"))
             {
-                context.Response.StatusCode = (int)HttpStatusCode.Unauthorized;
-                return;
-            }
-        }
-
-        var token = string.Empty;
-        if (authorization.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
-        {
-            token = authorization["Bearer ".Length..].Trim();
-        }
-
-        if (string.IsNullOrEmpty(token))
-        {
-            context.Response.StatusCode = (int)HttpStatusCode.Unauthorized;
-            return;
-        }
-
-        try
-        {
-            var handler = new JwtSecurityTokenHandler();
-            var jsonToken = handler.ReadToken(token);
-
-            if (jsonToken is JwtSecurityToken principal)
-            {
-                var expiryDateUnix = long.Parse(principal.Claims.Single(x => x.Type == JwtRegisteredClaimNames.Exp).Value);
-                var expiryDateTimeUtc = DateTimeOffset.FromUnixTimeSeconds(expiryDateUnix).UtcDateTime;
-
-                if (expiryDateTimeUtc < DateTime.UtcNow)
+                string authorization = context.Request.Headers["Authorization"];
+                if (string.IsNullOrEmpty(authorization))
                 {
-                    context.Response.StatusCode = (int)HttpStatusCode.Unauthorized;
-                    var myByteArray = Encoding.UTF8.GetBytes("TokenExpired");
-                    await context.Response.Body.WriteAsync(myByteArray);
+                    authorization = context.Request.Headers["Token"];
+                    if (string.IsNullOrEmpty(authorization))
+                    {
+                        // No token at all — pass through, let [Authorize]/[AllowAnonymous] decide
+                        await next(context);
+                        return;
+                    }
+                }
+
+                var token = string.Empty;
+                if (authorization.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+                {
+                    token = authorization.Substring("Bearer ".Length).Trim();
+                }
+
+                if (string.IsNullOrEmpty(token))
+                {
+                    await next(context);
                     return;
                 }
 
-                var claimIdentity = GetAllClaims(principal, context, token);
-                context.User = new ClaimsPrincipal(claimIdentity);
+                try
+                {
+                    var stream = token;
+                    var handler = new JwtSecurityTokenHandler();
+                    var jsonToken = handler.ReadToken(stream);
+
+                    var principal = jsonToken as JwtSecurityToken;
+                    if (principal != null)
+                    {
+                        var expiryDateUnix = long.Parse(principal.Claims.Single(x => x.Type == JwtRegisteredClaimNames.Exp).Value);
+                        var expiryDateTimeUtc = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddSeconds(expiryDateUnix);
+                        var claimIdentity = GetAllClaims(principal, context, token);
+                        context.User = new ClaimsPrincipal(claimIdentity);
+                        string LoggedInUserEmail = context?.User.Identities.FirstOrDefault()?.Claims.FirstOrDefault(x => x.Type == "email")?.Value;
+                        if (expiryDateTimeUtc < DateTime.UtcNow)
+                        {
+                            context.Response.StatusCode = (int)HttpStatusCode.Unauthorized;
+                            var myByteArray = Encoding.UTF8.GetBytes("TokenExpired");
+                            await context.Response.Body.WriteAsync(myByteArray, 0, myByteArray.Length);
+                            return;
+                        }
+                    }
+                }
+                catch (Exception)
+                {
+                    // If legacy token processing fails, pass through — let [Authorize]/[AllowAnonymous] decide
+                    await next(context);
+                    return;
+                }
             }
-        }
-        catch (Exception)
-        {
-            context.Response.StatusCode = (int)HttpStatusCode.Unauthorized;
-            return;
+            await next(context);
         }
 
-        await next(context);
-    }
-
-    private ClaimsIdentity GetAllClaims(JwtSecurityToken principal, HttpContext context, string token)
-    {
-        UserIdentity userIdentity = GetUserIdentity(context);
-        string email = string.Empty;
-        string name = string.Empty;
-        bool isImpersonateUser = false;
-        string impersonateBy = string.Empty;
-        long impersonateById = 0;
-
-        if (userIdentity.IsImpersonatedUser)
+        private ClaimsIdentity GetAllClaims(JwtSecurityToken principal, HttpContext context, string token)
         {
-            email = userIdentity.EmailId ?? string.Empty;
-            name = $"{userIdentity.FirstName} {userIdentity.LastName}";
-            isImpersonateUser = true;
-            impersonateBy = userIdentity.ImpersonatedBy ?? string.Empty;
-            impersonateById = userIdentity.ImpersonatedById;
-        }
-        else
-        {
+            UserIdentity userIdentity = GetUserIdentity(context);
+            string email = string.Empty;
+            string name = string.Empty;
+            bool isImpersonatedUser = false;
+            string impersonatedBy = string.Empty;
+            string impersonatedByUserName = string.Empty;
+            long impersonatedById = 0;
+            long impersonatedUserId = 0;
+            bool isSSO = true;
+            string encryptIdentity = string.Empty;
+
             var emailClaim = principal.Claims.FirstOrDefault(x => x.Type == "email");
             if (emailClaim != null && !string.IsNullOrEmpty(emailClaim.Value))
-            {
                 email = emailClaim.Value;
-            }
             else
             {
                 var preferredClaim = principal.Claims.FirstOrDefault(x => x.Type == "preferred_username");
                 if (preferredClaim != null && !string.IsNullOrEmpty(preferredClaim.Value))
-                {
                     email = preferredClaim.Value;
-                }
                 else
                 {
                     var uniqueClaim = principal.Claims.FirstOrDefault(x => x.Type == "unique_name");
                     if (uniqueClaim != null && !string.IsNullOrEmpty(uniqueClaim.Value))
-                    {
                         email = uniqueClaim.Value;
-                    }
                 }
             }
 
-            name = principal.Claims.FirstOrDefault(x => x.Type == "name")?.Value ?? string.Empty;
-        }
+            if (principal.Claims.FirstOrDefault(x => x.Type == "name") != null)
+                name = principal.Claims.FirstOrDefault(x => x.Type == "name")?.Value;
 
-        var hasTenant = context.Request.Headers.TryGetValue("TenantId", out var tenantId);
-        if (!hasTenant && context.Request.Host.Value.Contains("localhost"))
-        {
-            tenantId = _configuration.GetValue<string>("TenantId");
-        }
-
-        if (hasTenant && !string.IsNullOrEmpty(tenantId))
-        {
-            tenantId = Encryption.DecryptRijndael(tenantId!, AppConstants.EncryptionPrivateKey);
-        }
-
-        var hasOrigin = context.Request.Headers.TryGetValue("OriginHost", out var origin);
-        if (!hasOrigin && context.Request.Host.Value.Contains("localhost"))
-        {
-            var frontEndUrl = _configuration.GetValue<string>("FrontEndUrl");
-            if (!string.IsNullOrEmpty(frontEndUrl))
+            if (IsIssuerUnlockTalent(principal))
             {
-                origin = _systemService.SystemUri(frontEndUrl).Host;
+                isSSO = false;
+            }
+
+            if (string.IsNullOrEmpty(email))
+            {
+                if (userIdentity == null || string.IsNullOrEmpty(userIdentity?.EmailId))
+                {
+                    email = "";
+                }
+                else
+                {
+                    email = userIdentity.EmailId;
+                    name = userIdentity.FirstName + " " + userIdentity.LastName;
+                }
+            }
+
+            if (userIdentity.IsImpersonatedUser)
+            {
+                email = userIdentity.EmailId;
+                name = userIdentity.FirstName + " " + userIdentity.LastName;
+                isImpersonatedUser = true;
+                impersonatedBy = userIdentity.ImpersonatedBy;
+                impersonatedById = userIdentity.ImpersonatedById;
+                impersonatedUserId = userIdentity.EmployeeId;
+            }
+
+            var claimList = new List<Claim>
+                {
+                    new Claim("email", email),
+                    new Claim("name", name),
+                    new Claim("token", token),
+                    new Claim("tenantId", GetTenantCliams(context)),
+                    new Claim("origin", GetOriginCliams(context)),
+                    new Claim("isImpersonateUser", isImpersonatedUser.ToString(), ClaimValueTypes.Boolean),
+                    new Claim("impersonateBy", impersonatedBy),
+                    new Claim("impersonateById", impersonatedById.ToString(), ClaimValueTypes.Integer64),
+                    new Claim("impersonateByUserName", impersonatedByUserName),
+                    new Claim("impersonateUserId", impersonatedUserId.ToString(), ClaimValueTypes.Integer64),
+                    new Claim("isSSO", isSSO.ToString(), ClaimValueTypes.Boolean),
+                    new Claim("encryptIdentity", GetUserIdentityClaims(context)),
+                    new Claim("employeeId", userIdentity.EmployeeId.ToString(), ClaimValueTypes.Integer64)
+                };
+
+            return new ClaimsIdentity(claimList, "Bearer");
+        }
+
+        private UserIdentity GetUserIdentity(HttpContext httpContext)
+        {
+            try
+            {
+                var hasIdentity = httpContext.Request.Headers.TryGetValue("UserIdentity", out var userIdentity);
+                UserIdentity identity = new UserIdentity();
+                if (hasIdentity)
+                {
+                    var decryptVal = Encryption.DecryptStringAes(userIdentity, AppConstants.EncryptionSecretKey, AppConstants.EncryptionSecretIvKey);
+                    if (string.IsNullOrEmpty(decryptVal)) return identity;
+                    identity = JsonConvert.DeserializeObject<UserIdentity>(decryptVal);
+                }
+                return identity;
+            }
+            catch (Exception)
+            {
+                return new UserIdentity();
             }
         }
 
-        if (hasOrigin && !string.IsNullOrEmpty(origin))
+        private string GetUserIdentityClaims(HttpContext context)
         {
-            origin = _systemService.SystemUri(origin!).Host;
-        }
-
-        var claimList = new List<Claim>
-        {
-            new("email", email),
-            new("name", name),
-            new("token", token),
-            new("tenantId", tenantId.ToString() ?? string.Empty),
-            new("origin", origin.ToString() ?? string.Empty),
-            new("isImpersonateUser", isImpersonateUser.ToString(), ClaimValueTypes.Boolean),
-            new("impersonateBy", impersonateBy),
-            new("impersonateById", impersonateById.ToString(), ClaimValueTypes.Integer64)
-        };
-
-        return new ClaimsIdentity(claimList, "Bearer");
-    }
-
-    private UserIdentity GetUserIdentity(HttpContext httpContext)
-    {
-        var hasIdentity = httpContext.Request.Headers.TryGetValue("UserIdentity", out var userIdentity);
-        var identity = new UserIdentity();
-
-        if (hasIdentity && !string.IsNullOrEmpty(userIdentity))
-        {
-            var decryptVal = Encryption.DecryptStringAes(userIdentity!, AppConstants.EncryptionSecretKey, AppConstants.EncryptionSecretIvKey);
-            if (!string.IsNullOrEmpty(decryptVal))
+            string encryptUserIdentity = string.Empty;
+            var hasIdentity = context.Request.Headers.TryGetValue("UserIdentity", out var userIdentity);
+            if (hasIdentity && !string.IsNullOrEmpty(userIdentity) && userIdentity != "null")
             {
-                identity = JsonSerializer.Deserialize<UserIdentity>(decryptVal) ?? new UserIdentity();
+                encryptUserIdentity = userIdentity;
             }
+            return encryptUserIdentity;
         }
 
-        return identity;
+        private string GetOriginCliams(HttpContext context)
+        {
+            var hasOrigin = context.Request.Headers.TryGetValue("OriginHost", out var origin);
+            if (!hasOrigin && context.Request.Host.Value.Contains("localhost"))
+                origin = new Uri(_configuration.GetValue<string>("FrontEndUrl")).Host;
+
+            if (hasOrigin)
+                origin = new Uri(origin).Host;
+
+            return origin;
+        }
+
+        private string GetTenantCliams(HttpContext context)
+        {
+            var hasTenant = context.Request.Headers.TryGetValue("TenantId", out var tenantId);
+            if (!hasTenant && context.Request.Host.Value.Contains("localhost") || string.IsNullOrEmpty(tenantId) || tenantId == "null")
+                tenantId = _configuration.GetValue<string>("TenantId");
+            else
+                tenantId = Encryption.DecryptRijndael(tenantId, AppConstants.EncryptionPrivateKey);
+
+            return tenantId;
+        }
+
+        private bool IsIssuerUnlockTalent(JwtSecurityToken principal)
+        {
+            bool isDBLogin = false;
+            string issuerSub = principal.Claims.Single(x => x.Type == JwtRegisteredClaimNames.Sub).Value;
+            if (!string.IsNullOrEmpty(issuerSub) && issuerSub == "DBLogin")
+            {
+                isDBLogin = true;
+            }
+            return isDBLogin;
+        }
     }
 }
